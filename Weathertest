@@ -1,0 +1,374 @@
+Analysis of the Human and Economic Impacts of Severe Weather in the USA
+========================================================
+	
+	Emmanuel Bernabe
+
+June 2014
+
+### Synopsis 
+
+This analysis involves exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database to assess the human and economic effects of severe weather in the United States.  In measuring the human cost of severe weather, the analysis looks at two distinct metrics across major weather event types: fatalities and injuries.  In evaluating economic costs, the total of property and crop damages is considered.  The analysis concludes that tornados and severe heat have been the most  harmful to a respective local population.  However, floods and hurricanes have had the most detrimental economic effects. 
+
+
+```{r, echo=FALSE, results='hide'}
+### Set up
+
+## Good trick!
+cat("\014") #clears console
+
+## Remove all objects; perform garbage collection
+rm(list=ls())
+gc(reset=TRUE)
+
+## Check for dependencies
+if(!"geneorama" %in% rownames(installed.packages())){
+if(!"devtools" %in% rownames(installed.packages())){
+install.packages('devtools')
+}
+devtools::install_github('geneorama/geneorama')
+}
+
+## Load libraries
+geneorama::detach_nonstandard_packages()
+geneorama::loadinstall_libraries(c("geneorama", "knitr", "data.table"))
+
+
+opts_chunk$set(tidy=FALSE, fig.width=12, echo=FALSE, results="hide")
+
+
+```
+
+```{r}
+### Set the working directory
+
+## This will be "{something}/DataScienceForBusiness" when you are stepping
+## through the code, but when you compile with knitr it will be 
+## "{something}/DataScienceForBusiness/StormAnalysis"
+print(getwd())
+
+## This navigates up one directory to make sure you're in the top level 
+## of the project.  Currently the script is stored in a sub folder... and 
+## knitr will treat the sub folder as the current working directory.
+geneorama::set_project_dir("DataScienceForBusiness")
+
+## This will be "{something}/DataScienceForBusiness" when you are stepping
+## through the code OR knitting the document with knitr.
+print(getwd())
+```
+
+
+
+```{r}
+### Data Processing
+
+## Download and read in data, only if not already read in:
+
+## Unfortuntately you have to do the above trick every time you access the file
+## structure
+geneorama::set_project_dir("DataScienceForBusiness")
+
+localfile_zip <- "StormAnalysis/stormzip.bz2"
+localfile_rds <- "StormAnalysis/stormaip.Rds"
+localfile_rds_noremarks <- "StormAnalysis/stormzip_noremarks.Rds"
+
+## Download and read data
+if(!localfile_zip %in% list.files("StormAnalysis", full.names = TRUE)){
+	url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+	download.file(url, destfile = localfile_zip)
+	rm(url)
+	
+	## Read in the CSV file ONE TIME and save as RDS
+	## I use read.table because it has more features and documentation than
+	## the other read.xxx functions
+	storm <- read.table(localfile_zip, header=T, stringsAsFactors=F, sep=",")
+	## Do the data conversions before saving so that you don't have to
+	## redo the conversions when you re load (string conversions take a while)
+	## Also, use POSIXct to keep the date and time... but if you're just 
+	## going to use dates, then use IDate (interger based dates)
+	## Also, I'll do the conversion using data.table which is ultimately faster
+	## and I want to reinforce the syntax.
+	storm <- as.data.table(storm)
+	storm[ , BGN_DATE := as.IDate(BGN_DATE, "%m/%d/%Y %H:%M:%S")]
+	
+
+## DATA.TABLE SYNTAX:
+storm[PROPDMG>0 & CROPDMG>0, list(PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)][1:15]
+
+u_var <- storm[ , unique(PROPDMGEXP)]
+```
+
+Thus, we have a number of transformations to make: `r u_var`.
+
+### Solution#1: grepl function
+
+The section below sorts event type observations into a narrow set of major event type classifications (Flood, Storm, etc.).  Observations not neatly sorted into one of the major event type classifications are labeled as Other.  
+
+``	## Save RDS file
+	saveRDS(storm, localfile_rds)
+	
+	## I also noticed that "remarks" is by far the largest field (and remarks
+	## are not used anywhere), so...
+	storm[ , REMARKS := NULL]
+	saveRDS(storm, localfile_rds_noremarks)
+	
+	## you could also remove the old file 
+	# unlink(localfile_zip)
+	
+	## Normally the Rds file is smaller than any source data, but in this
+	## case it's bigger because bzip is very efficient.  Both are smaller 
+	## than the 500mb+ CSV file!
+	
+} else {
+	
+	## If you've already downloaded storm... then just read it in
+	# readRDS(localfile_rds)
+	storm <- readRDS(localfile_rds_noremarks)
+}
+rm(localfile_rds, localfile_rds_noremarks, localfile_zip)
+```
+
+### A quick peek at the data
+
+```{r, echo=TRUE, results='markup'}
+str(storm)
+head(storm, 10)
+dim(storm)
+```
+
+### Obstacle #1: Too many event types
+
+```{r}
+## Count event types
+storm[ , .N, EVTYPE]
+## Count event types, and (on the fly) order by -N
+storm[ , .N, EVTYPE][order(-N)]
+```
+
+The summary of event types, before aggregation:
+	```{r, results='markup'}
+storm[ , .N, EVTYPE][order(-N)]
+```
+
+At the onset, there are some `r nrow(storm[,.N,EVTYPE])` unique event types.  Yikes!  Below are a sample:
+	
+	```{r, echo=TRUE, results='markup'}
+set.seed(1)
+unique(sample(storm$EVTYPE, 1000))
+```
+
+And what about events that are wind related? Yes, there are several.  A sample, below.
+
+```{r}
+## The original name was "name.wind". I would avoid using names that have dots.
+## Although this is a very "R way" of doing things, it's a mistake because 
+## it confuses the rest of the world, where . means operator. Underscore works
+## just as well in nearly every case, and never causes confusion.
+
+## The data.table version of this is confusing to new users, but the notes 
+## should help
+name_wind <- 
+	storm[i = grepl("Wind", EVTYPE, ignore.case=T), ## Specify which rows you want
+		  j = .N,                                   ## Return a column of the "count"
+		  keyby = EVTYPE]                           ## Grouped by each unique instance of "EVTYPE"
+
+## The above, but in one line:
+# storm[grepl("Wind", EVTYPE, ignore.case=T), .N, EVTYPE]
+
+## Former syntax for comparison:
+# unique(storm[grepl("Wind", storm$EVTYPE, ignore.case=T), "EVTYPE", with=F])
+
+## Print a sample wind events:
+set.seed(2)
+```
+
+```{r, echo=TRUE, results='markup'}
+sample(name_wind$EVTYPE, 30, replace=F)
+```
+
+The number of wind related events is `r nrow(name_wind)`!
+	
+	### Obstacle #2: Crop and property damages values need conversion
+	
+	Two columns are used to derive montary values.  A base number combined with a column that combines units and exponents.
+
+
+```{r}
+
+## Great example to show why data.table is nice... these examples rarely happen 
+## until you're doing real work
+
+## DATA.FRAME SYNTAX:
+# head(storm[which(storm$PROPDMG>0 & storm$CROPDMG>0),
+# 		   c("PROPDMG", "PROPDMGEXP", "CROPDMG", "CROPDMGEXP")],15)
+`{r, echo=TRUE}
+
+## Let's work with a copy of EVTYPE
+## I'll call it EVTYPE_CAT for CATEGORY
+
+storm[ , EVTYPE_CAT := ""]
+
+## Replace EVTYPE_CAT with the effective category
+storm[grepl("flood", EVTYPE, ignore.case=T), EVTYPE_CAT := "Flood"]
+storm[grepl("storm", EVTYPE, ignore.case=T), EVTYPE_CAT := "Storm"]
+storm[grepl("hurricane", EVTYPE, ignore.case=T), EVTYPE_CAT := "Hurricane"]
+storm[grepl("Tornado", EVTYPE, ignore.case=T), EVTYPE_CAT := "Tornado"]
+storm[grepl("Hail", EVTYPE, ignore.case=T), EVTYPE_CAT := "Hail"]
+storm[grepl("Fire", EVTYPE, ignore.case=T), EVTYPE_CAT := "Fire"]
+storm[grepl("Wind", EVTYPE, ignore.case=T), EVTYPE_CAT := "Wind"]
+storm[grepl("Snow", EVTYPE, ignore.case=T), EVTYPE_CAT := "Snow"]
+storm[grepl("Cold", EVTYPE, ignore.case=T), EVTYPE_CAT := "Cold"]
+storm[grepl("Heat", EVTYPE, ignore.case=T), EVTYPE_CAT := "Heat"]
+storm[grepl("Rain", EVTYPE, ignore.case=T), EVTYPE_CAT := "Rain"]
+storm[grepl("Frost", EVTYPE, ignore.case=T), EVTYPE_CAT := "Frost"]
+storm[grepl("Freeze", EVTYPE, ignore.case=T), EVTYPE_CAT := "Cold"]
+storm[grepl("Drought", EVTYPE, ignore.case=T), EVTYPE_CAT := "Drought"]
+storm[grepl("Winter", EVTYPE, ignore.case=T), EVTYPE_CAT := "Winter"]
+storm[grepl("Freez", EVTYPE, ignore.case=T), EVTYPE_CAT := "Freeze"]
+storm[grepl("Icy Roads", EVTYPE, ignore.case=T), EVTYPE_CAT := "Cold"]
+storm[grepl("Typhoon", EVTYPE, ignore.case=T), EVTYPE_CAT := "Typhoon"]
+storm[grepl("Tsunami", EVTYPE, ignore.case=T), EVTYPE_CAT := "Tsunami"]
+storm[grepl("Landslide", EVTYPE, ignore.case=T), EVTYPE_CAT := "Landslide"]
+storm[grepl("Blizzard", EVTYPE, ignore.case=T), EVTYPE_CAT := "Blizzard"]
+storm[grepl("Wetness", EVTYPE, ignore.case=T), EVTYPE_CAT := "Wetness"]
+storm[grepl("Rip Current", EVTYPE, ignore.case=T), EVTYPE_CAT := "Rip Current"]
+storm[grepl("Lightning", EVTYPE, ignore.case=T), EVTYPE_CAT := "Lightning"]
+storm[grepl("Avalanche", EVTYPE, ignore.case=T), EVTYPE_CAT := "Avalanche"]
+
+## "Blank" is still the sixth largest category
+storm[ , .N, EVTYPE_CAT][order(-N)]
+
+## Since we're working with a copy we don't need this logic:
+# names_major_pop <- paste0("Rip Current|Lightning|Avalanche|Flood|Storm|",
+# 						  "Hurricane|Tornado|Rain|Hail|Fire|Wind|Drought|",
+# 						  "Cold|Typhoon|Heat|Frost|Wetness|Blizzard|Snow|",
+# 						  "Tsunam|Landslide")
+# storm[!grepl(names_major_pop, EVTYPE_CAT, ignore.case=T), .N, EVTYPE]
+
+## Create an "other"" cateogry
+storm[EVTYPE_CAT=="", EVTYPE_CAT := "Other"]
+
+## This is our "other" category summarized by the original EVTYPE
+storm[EVTYPE_CAT=="Other", .N, EVTYPE][order(-N)]
+
+## (Makes me think that we might want to add a couple more "major event" types)
+```
+
+### Solution #2: For loop
+
+Below, the property and crop damage figures in the original dataset are transformed to numeric values and summed to create a new variable "total.damage".       
+
+```{r, echo=TRUE}
+storm[,.N,PROPDMGEXP]
+storm[,.N,CROPDMGEXP]
+
+## Again, work with a copy of the column.  I'll start with NA's, but NA with a 
+## class of numeric / real.  The default class is logical
+storm[ , PROPDMGEXP_FIXED := NA_real_]
+storm[ , CROPDMGEXP_FIXED := NA_real_]
+storm[ , prop_damage := NA_real_]
+storm[ , crop_damage := NA_real_]
+storm[ , total_damage := NA_real_]
+
+## I think it's good practice to set up a lookup table as a table rather
+## than two vectors to help make sure they're matched:
+
+exp_lookup <- data.table(pattern = c("[hH]", "[kK]", "[mM]", "[bB]"),
+						 replacement = as.numeric(c(2, 3, 6, 9)))
+exp_lookup
+
+for(i in 1:nrow(exp_lookup)){
+	current_pattern <- exp_lookup$pattern[i]
+	current_replacement <- exp_lookup$replacement[i]
+	
+	storm[grep(current_pattern, PROPDMGEXP), PROPDMGEXP_FIXED := current_replacement]
+	storm[grep(current_pattern, CROPDMGEXP), CROPDMGEXP_FIXED := current_replacement]
+}
+rm(current_pattern, current_replacement, i)
+
+## These were the ones that didn't get replaced:
+storm[is.na(PROPDMGEXP_FIXED), .N, PROPDMGEXP]
+storm[is.na(CROPDMGEXP_FIXED), .N, CROPDMGEXP]
+
+## Make any NA's 0
+storm[is.na(PROPDMGEXP_FIXED), PROPDMGEXP_FIXED := 0]
+storm[is.na(CROPDMGEXP_FIXED), CROPDMGEXP_FIXED := 0]
+
+## I like to check the work with tables... 
+storm[ , table(PROPDMGEXP, PROPDMGEXP_FIXED, useNA = "ifany")]
+storm[ , table(CROPDMGEXP, CROPDMGEXP_FIXED, useNA = "ifany")]
+
+## Convert to a number
+storm[ , prop_damage := PROPDMG * 10 ^ PROPDMGEXP_FIXED]
+storm[ , crop_damage := CROPDMG * 10 ^ CROPDMGEXP_FIXED]
+storm[ , total_damage := prop_damage + crop_damage]
+
+```
+
+Summarize and tabulate the total of number of deaths/injuries, and the total economic impact of severe weather events:
+	
+	```{r, echo=TRUE, results='markup'}
+# library(plyr)
+## Summarize in one easy step with data.table, and rename the columns on the fly
+## The renaming will save us having to manually declare the axis labels later
+event_summary <- storm[i = TRUE, 
+					   j = list(Total_Fatalities = sum(FATALITIES),
+					   		 Total_Injuries = sum(INJURIES),
+					   		 Total_Economic_Cost = sum(total_damage)),
+					   keyby = list(Event_Type = EVTYPE_CAT)]
+event_summary[ , Event_Type := factor(Event_Type, 
+									  levels = Event_Type[order(Total_Fatalities)])]
+setkey(event_summary, Event_Type)
+event_summary
+```
+
+
+### Results
+
+The below graph plots the total number of human fatalities per major event type.
+
+```{r}
+library(ggplot2)
+ggplot(event_summary, aes(Event_Type, Total_Fatalities)) + 
+	geom_bar(stat="identity",colour="green") + 
+	coord_flip() +
+	theme_bw() +
+	labs(title = "Fatalities per Major Weather Type\n") 
+# + 
+# 	labs(x ="Event Type", y = "Total Fatalities")
+```
+
+
+
+The below graph plots the total number of human injuries per major event type.
+
+```{r}
+ggplot(event_summary, aes(Event_Type, Total_Injuries)) +
+	geom_bar(stat="identity",colour="red") + 
+	coord_flip() + 
+	theme_bw() + 
+	labs(title = "Injuries per Major Weather Type\n") 
+# + 
+# 	labs(x ="Event Type", y = "Total Injuries")
+```
+
+
+The below graph plots the total economic costs per major event type.
+
+```{r}
+ggplot(event_summary, aes(Event_Type, Total_Economic_Cost)) +
+	geom_bar(stat="identity",colour="blue") +
+	coord_flip() +
+	theme_bw() +
+	labs(title = "Total Economic Cost per Major Weather Type\n") 
+# + 
+# 	labs(x ="Event Type", y = "Total Economic Cost")
+"StormAnalysis/"
+```
+
+## Bonus plot... can you replicate it?
+
+Your mission: figure out how to make this plot:
+	
+	![facet plot](facet_plot.png)
+
+hint: check out faceting in ggplot2
